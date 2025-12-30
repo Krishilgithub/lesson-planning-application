@@ -283,9 +283,6 @@ export default function EditActualForm({
 		Record<string, boolean>
 	>({});
 
-	// Store form data in a ref to preserve it across re-renders
-	const formDataCache = useRef<Record<string, any>>({});
-
 	document.body.style.overflow = "hidden"; // This has been done to fix that weird error where some white blank space appears on scroll
 
 	// FIXED: Custom tab setter that saves to localStorage
@@ -551,29 +548,9 @@ export default function EditActualForm({
 				const missingFields = validateRequiredFields(values, existingActual);
 				if (missingFields.length > 0) {
 					console.log("Validation failed - missing fields:", missingFields);
-					// Display error with all missing fields
-					toast.error(
-						<div>
-							<p className="font-semibold mb-2">
-								Cannot submit - Missing required fields:
-							</p>
-							<ul className="list-disc list-inside space-y-1">
-								{missingFields.map((field, idx) => (
-									<li key={idx} className="text-sm">
-										{field}
-									</li>
-								))}
-							</ul>
-							<p className="text-xs mt-3 text-gray-600 italic">
-								Your entered data has been preserved. Please complete the
-								missing fields and try again.
-							</p>
-						</div>,
-						{
-							duration: 10000,
-						}
-					);
-					// Don't reset form - user data is preserved
+					toast.error(`Can't submit - ${missingFields.join(", ")}`, {
+						duration: 5000,
+					});
 					return;
 				}
 
@@ -809,11 +786,14 @@ export default function EditActualForm({
 		async (values: FormData, cieData: any, form: any) => {
 			const cieId = cieData.id;
 			const cieNumber = Number.parseInt(cieId.replace("cie", ""));
+			console.log("Getting existing actual");
 			const existingActual = getExistingActual(cieId);
+			console.log("Set is draft saving true");
 			setIsDraftSaving(true);
 			setDraftSaveStatus((prev) => ({ ...prev, [cieId]: true }));
 
 			try {
+				console.log("Preparing draft data");
 				// Prepare draft data - no validation, can be partial
 				const draftData = {
 					faculty_id: userRoleData.users.id,
@@ -828,79 +808,117 @@ export default function EditActualForm({
 						values.actual_pedagogy === "Other"
 							? values.custom_pedagogy
 							: values.actual_pedagogy || null,
-					actual_units:
-						values.actual_units &&
-						Array.isArray(values.actual_units) &&
-						values.actual_units.length > 0
-							? values.actual_units.join(", ")
-							: null,
-					actual_skills:
-						values.actual_skills &&
-						Array.isArray(values.actual_skills) &&
-						values.actual_skills.length > 0
-							? values.actual_skills.join(", ")
-							: null,
-					co:
-						values.co && Array.isArray(values.co) && values.co.length > 0
-							? values.co.join(", ")
-							: null,
-					pso:
-						values.pso && Array.isArray(values.pso) && values.pso.length > 0
-							? values.pso.join(", ")
-							: null,
-					actual_blooms:
-						values.actual_blooms &&
-						Array.isArray(values.actual_blooms) &&
-						values.actual_blooms.length > 0
-							? values.actual_blooms.join(", ")
-							: null,
+					actual_units: Array.isArray(values.actual_units)
+						? values.actual_units.join(", ")
+						: values.actual_units || null,
+					actual_skills: values.actual_skills?.join(", ") || null,
+					co: values.co?.join(", ") || null,
+					pso: values.pso?.join(", ") || null,
+					actual_blooms: values.actual_blooms?.join(", ") || null,
 					reason_for_change: values.reason_for_change || null,
 					marks_display_date: values.marks_display_date || null,
 					quality_review_completed: values.quality_review_completed || false,
 					moderation_start_date: values.moderation_start_date || null,
 					moderation_end_date: values.moderation_end_date || null,
-					is_submitted: false,
+					is_submitted: false, // MARK AS DRAFT
 					created_at: existingActual?.created_at || new Date().toISOString(),
 				};
 
-// Preserve existing file paths if they exist
-			if (existingActual?.cie_paper_document) {
-				draftData.cie_paper_document = existingActual.cie_paper_document;
-			}
-			if (existingActual?.evalution_analysis_document) {
-				draftData.evalution_analysis_document = existingActual.evalution_analysis_document;
-			}
-			if (existingActual?.marks_display_document) {
-				draftData.marks_display_document = existingActual.marks_display_document;
-			}
-			if (existingActual?.moderation_report_document) {
-				draftData.moderation_report_document = existingActual.moderation_report_document;
-			}
+				console.log("Draft data to be saved:", draftData);
 
-			// Call server action to save draft
-			const result = await saveActualCieDraft(draftData, existingActual?.id);
+				let result;
+				if (existingActual?.id) {
+					// Update existing draft
+					console.log("Inserting into supabase");
+					result = await supabase
+						.from("actual_cies")
+						.update(draftData)
+						.eq("id", existingActual.id)
+						.select();
+				} else {
+					// Create new draft
+					console.log("Inserting into supabase");
+					result = await supabase
+						.from("actual_cies")
+						.insert(draftData)
+						.select();
+				}
 
-			if (!result.success) {
-				throw new Error(result.error);
-			}
+				console.log("Draft save result:", result);
 
-			// Optimistic update
-			setOptimisticUpdates((prev) => ({
-				...prev,
-				[cieId]: { ...result.data, is_submitted: false },
-			}));
+				if (result.error) {
+					throw new Error(result.error.message);
+				}
 
-			toast.success("Draft saved successfully!");
-			setTimeout(() => window.location.reload(), 500);
-		} catch (error: any) {
-				console.error("Draft save error:", error);
+				// Optimistic update
+				setOptimisticUpdates((prev) => ({
+					...prev,
+					[cieId]: { ...result.data[0], is_submitted: false },
+				}));
+
+				// Handle file uploads in background (optional for draft)
+				if (result.data?.[0]?.id) {
+					const recordId = result.data[0].id;
+					const files = [
+						{
+							file: values.cie_paper_file,
+							field: "cie_paper_document",
+							type: "paper",
+						},
+						{
+							file: values.marks_display_document,
+							field: "marks_display_document",
+							type: "marks",
+						},
+						{
+							file: values.evaluation_analysis_file,
+							field: "evalution_analysis_document",
+							type: "analysis",
+						},
+						{
+							file: values.moderation_report_document,
+							field: "moderation_report_document",
+							type: "moderation",
+						},
+					].filter((item) => item.file instanceof File);
+
+					console.log("Files to be uploaded in background:", files);
+
+					// Background upload
+					if (files.length > 0) {
+						setTimeout(async () => {
+							try {
+								for (const { file, field, type } of files) {
+									form.setValue(field, file);
+									const fileExt = file.name.split(".").pop();
+									const filePath = `${type}/${recordId}-${Date.now()}.${fileExt}`;
+
+									await supabase.storage
+										.from("actual-cies")
+										.upload(filePath, file);
+
+									await supabase
+										.from("actual_cies")
+										.update({ [field]: filePath })
+										.eq("id", recordId);
+								}
+							} catch (error) {
+								console.error("Background file upload error:", error);
+							}
+						}, 0);
+					}
+				}
+
+				toast.success("Draft saved successfully!");
+				window.location.reload();
+			} catch (error: any) {
 				toast.error("Failed to save draft: " + error.message);
 			} finally {
 				setIsDraftSaving(false);
 				setDraftSaveStatus((prev) => ({ ...prev, [cieId]: false }));
 			}
 		},
-		[formsData, getExistingActual, userRoleData]
+		[formsData, getExistingActual, supabase, userRoleData]
 	);
 
 	const CieTabContent = ({ cieData }: { cieData: any }) => {
@@ -966,19 +984,8 @@ export default function EditActualForm({
 			};
 		}, [cieData, extractedOptions]);
 
-		const cieId = cieData.id;
-
-		// Check if we have cached form data for this CIE
-		const cachedData = formDataCache.current[cieId];
-
-		const defaultValues: FormData = useMemo(() => {
-			// If we have cached data (from previous render), use it
-			if (cachedData) {
-				return cachedData;
-			}
-
-			// Otherwise, use default values from existing actual or CIE data
-			return {
+		const defaultValues: FormData = useMemo(
+			() => ({
 				actual_units: existingActual?.actual_units
 					? existingActual.actual_units.split(", ").map((unit: string) => {
 							const unitMatch = unit.match(/Unit (\d+)/);
@@ -1041,43 +1048,15 @@ export default function EditActualForm({
 				evaluation_analysis_file: null,
 				marks_display_document: null,
 				moderation_report_document: null,
-			};
-		}, [existingActual, cieData, extractedOptions, plannedData, cachedData]);
+			}),
+			[existingActual, cieData, extractedOptions, plannedData]
+		);
 
 		const form = useForm<FormData>({
 			resolver: zodResolver(formSchema),
 			defaultValues,
 			shouldUnregister: false,
-			mode: "onSubmit", // Only validate on submit
-			reValidateMode: "onChange", // Re-validate on change after first submit
-			resetOptions: {
-				keepDirtyValues: true, // Keep user-entered values
-				keepErrors: true, // Keep validation errors
-			},
 		});
-
-		// Track if form has been initialized to prevent reset on re-renders
-		const [formInitialized, setFormInitialized] = useState(false);
-
-		// Prevent form reset on re-render - only initialize once
-		useEffect(() => {
-			if (!formInitialized) {
-				// First time initialization only
-				setFormInitialized(true);
-			}
-			// Never reset after initialization - form data is always preserved
-		}, []); // Empty dependency - only run once on mount
-
-		// Watch form values and cache them to preserve across re-renders
-		useEffect(() => {
-			const subscription = form.watch((data) => {
-				// Cache the current form data for this CIE
-				if (data && Object.keys(data).length > 0) {
-					formDataCache.current[cieId] = data as FormData;
-				}
-			});
-			return () => subscription.unsubscribe();
-		}, [form, cieId]);
 
 		// State for custom skill input
 		const [customSkill, setCustomSkill] = useState("");
@@ -1129,12 +1108,7 @@ export default function EditActualForm({
 		}
 
 		const onSubmit = (values: FormData) => handleSubmit(values, cieData, form);
-		const onSaveDraft = () => {
-			console.log("Save Draft button clicked");
-			const currentValues = form.getValues();
-			console.log("Current form values:", currentValues);
-			handleSaveDraft(currentValues, cieData, form);
-		};
+		const onSaveDraft = () => handleSaveDraft(form.getValues(), cieData, form);
 
 		// File upload handler with real-time preview
 		const handleFileUpload = (file: File, fieldName: string, cieId: string) => {
@@ -2470,22 +2444,22 @@ export default function EditActualForm({
 
 											{/* Action Buttons */}
 											<div className="flex justify-between gap-4 mt-6">
-												<Button
-													type="button"
-													variant="outline"
-													onClick={onSaveDraft}
-													disabled={isDraftSavingThisCie || isSubmitting}
-													className="min-w-[120px] bg-transparent"
-												>
-													{isDraftSavingThisCie ? (
-														<>
-															<Loader2 className="h-4 w-4 mr-2 animate-spin" />
-															Saving...
-														</>
-													) : (
-														<>Save Draft</>
-													)}
-												</Button>
+												{/* <Button
+                          type="button"
+                          variant="outline"
+                          onClick={onSaveDraft}
+                          disabled={isDraftSavingThisCie || isSubmitting}
+                          className="min-w-[120px] bg-transparent"
+                        >
+                          {isDraftSavingThisCie ? (
+                            <>
+                              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                              Saving...
+                            </>
+                          ) : (
+                            <>Save Draft</>
+                          )}
+                        </Button> */}
 												{/* Updated Submit button */}
 												<Button
 													type="submit"
