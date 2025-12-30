@@ -43,6 +43,7 @@ import {
 } from "lucide-react";
 import { supabase } from "@/utils/supabase/client";
 import { toast } from "sonner";
+import { saveActualCieDraft } from "@/app/dashboard/actions/saveActualCieDraft";
 import {
 	Popover,
 	PopoverContent,
@@ -808,16 +809,11 @@ export default function EditActualForm({
 		async (values: FormData, cieData: any, form: any) => {
 			const cieId = cieData.id;
 			const cieNumber = Number.parseInt(cieId.replace("cie", ""));
-			console.log("Getting existing actual");
-			console.log("Form values to save:", values);
 			const existingActual = getExistingActual(cieId);
-			console.log("Existing actual:", existingActual);
-			console.log("Set is draft saving true");
 			setIsDraftSaving(true);
 			setDraftSaveStatus((prev) => ({ ...prev, [cieId]: true }));
 
 			try {
-				console.log("Preparing draft data");
 				// Prepare draft data - no validation, can be partial
 				const draftData = {
 					faculty_id: userRoleData.users.id,
@@ -863,117 +859,40 @@ export default function EditActualForm({
 					quality_review_completed: values.quality_review_completed || false,
 					moderation_start_date: values.moderation_start_date || null,
 					moderation_end_date: values.moderation_end_date || null,
-					is_submitted: false, // MARK AS DRAFT
+					is_submitted: false,
 					created_at: existingActual?.created_at || new Date().toISOString(),
 				};
 
-				console.log("Draft data to be saved:", draftData);
+// Preserve existing file paths if they exist
+			if (existingActual?.cie_paper_document) {
+				draftData.cie_paper_document = existingActual.cie_paper_document;
+			}
+			if (existingActual?.evalution_analysis_document) {
+				draftData.evalution_analysis_document = existingActual.evalution_analysis_document;
+			}
+			if (existingActual?.marks_display_document) {
+				draftData.marks_display_document = existingActual.marks_display_document;
+			}
+			if (existingActual?.moderation_report_document) {
+				draftData.moderation_report_document = existingActual.moderation_report_document;
+			}
 
-				let result;
-				if (existingActual?.id) {
-					// Update existing draft
-					console.log("Updating existing record:", existingActual.id);
-					try {
-						result = await supabase
-							.from("actual_cies")
-							.update(draftData)
-							.eq("id", existingActual.id)
-							.select();
-						console.log("Update completed");
-					} catch (updateError) {
-						console.error("Update error:", updateError);
-						throw updateError;
-					}
-				} else {
-					// Create new draft
-					console.log("Creating new draft record");
-					console.log("About to call supabase.from('actual_cies').insert()...");
-					try {
-						result = await supabase
-							.from("actual_cies")
-							.insert(draftData)
-							.select();
-						console.log("Insert completed");
-					} catch (insertError) {
-						console.error("Insert error:", insertError);
-						throw insertError;
-					}
-				}
+			// Call server action to save draft
+			const result = await saveActualCieDraft(draftData, existingActual?.id);
 
-				console.log("Draft save result:", result);
+			if (!result.success) {
+				throw new Error(result.error);
+			}
 
-				if (result.error) {
-					console.error("Database error:", result.error);
-					throw new Error(result.error.message);
-				}
+			// Optimistic update
+			setOptimisticUpdates((prev) => ({
+				...prev,
+				[cieId]: { ...result.data, is_submitted: false },
+			}));
 
-				// Optimistic update
-				setOptimisticUpdates((prev) => ({
-					...prev,
-					[cieId]: { ...result.data[0], is_submitted: false },
-				}));
-
-				// Handle file uploads in background (optional for draft)
-				if (result.data?.[0]?.id) {
-					const recordId = result.data[0].id;
-					const files = [
-						{
-							file: values.cie_paper_file,
-							field: "cie_paper_document",
-							type: "paper",
-						},
-						{
-							file: values.marks_display_document,
-							field: "marks_display_document",
-							type: "marks",
-						},
-						{
-							file: values.evaluation_analysis_file,
-							field: "evalution_analysis_document",
-							type: "analysis",
-						},
-						{
-							file: values.moderation_report_document,
-							field: "moderation_report_document",
-							type: "moderation",
-						},
-					].filter((item) => item.file instanceof File);
-
-					console.log("Files to be uploaded in background:", files);
-
-					// Background upload
-					if (files.length > 0) {
-						setTimeout(async () => {
-							try {
-								for (const { file, field, type } of files) {
-									const fileExt = file.name.split(".").pop();
-									const filePath = `${type}/${recordId}-${Date.now()}.${fileExt}`;
-
-									const uploadResult = await supabase.storage
-										.from("actual-cies")
-										.upload(filePath, file);
-
-									if (!uploadResult.error) {
-										await supabase
-											.from("actual_cies")
-											.update({ [field]: filePath })
-											.eq("id", recordId);
-									}
-								}
-							} catch (error) {
-								console.error("Background file upload error:", error);
-							}
-						}, 0);
-					}
-				}
-
-				toast.success("Draft saved successfully!");
-				console.log("Draft save completed, reloading page...");
-				// Small delay to ensure toast is visible before reload
-				setTimeout(() => {
-					window.location.reload();
-				}, 500);
-			} catch (error: any) {
+			toast.success("Draft saved successfully!");
+			setTimeout(() => window.location.reload(), 500);
+		} catch (error: any) {
 				console.error("Draft save error:", error);
 				toast.error("Failed to save draft: " + error.message);
 			} finally {
